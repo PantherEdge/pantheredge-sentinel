@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: sentinel-pantheredge
+    env: python
+    plan: free  # Start with free tier, upgrade to starter ($7/mo) when needed
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: MAX_FILE_SIZE_MB
+        value: 50
+      - key: MAX_ROWS
+        value: 100000
+      - key: DEFAULT_THRESHOLD
+        value: 5.0
+      - key: LOG_LEVEL
+        value: INFO
+      - key: PYTHON_VERSION
+        value: 3.11.0
