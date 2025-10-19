@@ -148,7 +148,7 @@ class SmartFileReader:
     
     @staticmethod
     def _find_header_row(lines: List[str]) -> int:
-        keywords = ['vendor', 'supplier', 'item', 'sku', 'product', 'price', 'cost', 'date', 'invoice', 'amount', 'quantity', 'description', 'total']
+        keywords = ['vendor', 'supplier', 'item', 'sku', 'product', 'price', 'cost', 'date', 'invoice', 'amount', 'quantity', 'description', 'total', 'material', 'rate']
         for idx, line in enumerate(lines[:10]):
             line_lower = line.lower()
             keyword_count = sum(1 for kw in keywords if kw in line_lower)
@@ -158,7 +158,7 @@ class SmartFileReader:
     
     @staticmethod
     def _find_header_row_excel(df: pd.DataFrame) -> int:
-        keywords = ['vendor', 'supplier', 'item', 'sku', 'product', 'price', 'cost', 'date', 'invoice', 'amount', 'quantity', 'description', 'total']
+        keywords = ['vendor', 'supplier', 'item', 'sku', 'product', 'price', 'cost', 'date', 'invoice', 'amount', 'quantity', 'description', 'total', 'material', 'rate']
         for idx in range(min(10, len(df))):
             row_str = ' '.join(str(val).lower() for val in df.iloc[idx] if pd.notna(val))
             keyword_count = sum(1 for kw in keywords if kw in row_str)
@@ -206,25 +206,60 @@ class PriceAnalyzer:
         return df
     
     def _detect_columns(self, df: pd.DataFrame) -> Dict[str, str]:
-        column_patterns = {
-            'vendor': [r'vendor', r'supplier', r'vendor name', r'supplier name', r'company', r'manufacturer', r'seller'],
-            'item': [r'item', r'sku', r'product', r'description', r'item description', r'product name', r'item name', r'part', r'part number', r'material'],
-            'unit_price': [r'unit price', r'price', r'cost', r'unit cost', r'price per unit', r'rate', r'amount', r'unit amount', r'price each', r'each'],
-            'date': [r'date', r'invoice date', r'purchase date', r'order date', r'transaction date', r'posting date', r'doc date'],
-            'quantity': [r'quantity', r'qty', r'amount', r'units', r'count', r'number'],
-            'total': [r'total', r'total price', r'total cost', r'line total', r'extended price', r'extended cost']
-        }
-        
+        """Improved column detection with flexible matching"""
         mapping = {}
-        for standard_name, patterns in column_patterns.items():
-            for col in df.columns:
-                col_clean = str(col).lower().strip()
-                for pattern in patterns:
-                    if re.search(pattern, col_clean):
-                        mapping[col] = standard_name
-                        break
-                if col in mapping:
-                    break
+        
+        for col in df.columns:
+            col_lower = str(col).lower().strip()
+            
+            # Vendor detection - must come first
+            if 'vendor' not in mapping.values():
+                if any(x in col_lower for x in ['vendor', 'supplier']):
+                    mapping[col] = 'vendor'
+                    continue
+            
+            # Item detection - flexible matching
+            if 'item' not in mapping.values():
+                if any(x in col_lower for x in ['item', 'sku', 'product', 'material', 'description', 'part']):
+                    # Avoid matching "item description" to both item and description
+                    if 'product' in col_lower and 'service' in col_lower:
+                        mapping[col] = 'item'
+                        continue
+                    elif 'material' in col_lower and ('desc' in col_lower or 'description' in col_lower):
+                        mapping[col] = 'item'
+                        continue
+                    elif col_lower in ['item', 'sku', 'product', 'material', 'part']:
+                        mapping[col] = 'item'
+                        continue
+                    elif 'description' not in col_lower:
+                        mapping[col] = 'item'
+                        continue
+            
+            # Price detection - exclude totals
+            if 'unit_price' not in mapping.values():
+                if ('price' in col_lower or 'cost' in col_lower or col_lower == 'rate') and 'total' not in col_lower:
+                    mapping[col] = 'unit_price'
+                    continue
+            
+            # Date detection
+            if 'date' not in mapping.values():
+                if 'date' in col_lower:
+                    mapping[col] = 'date'
+                    continue
+            
+            # Quantity detection
+            if 'quantity' not in mapping.values():
+                if any(x in col_lower for x in ['quantity', 'qty', 'ordered']):
+                    if 'order' not in col_lower or 'quantity' in col_lower or 'qty' in col_lower:
+                        mapping[col] = 'quantity'
+                        continue
+            
+            # Total detection
+            if 'total' not in mapping.values():
+                if 'total' in col_lower or (col_lower == 'amount' and 'unit' not in col_lower):
+                    mapping[col] = 'total'
+                    continue
+        
         return mapping
     
     def _build_helpful_error_message(self, df: pd.DataFrame) -> str:
@@ -235,10 +270,10 @@ class PriceAnalyzer:
         if len(df.columns) > 20:
             msg += f"  ... and {len(df.columns) - 20} more\n"
         msg += "\n✅ Required columns (with common variations):\n"
-        msg += "  • Vendor: 'Vendor', 'Supplier', 'Company'\n"
-        msg += "  • Item: 'Item', 'SKU', 'Product', 'Description'\n"
-        msg += "  • Price: 'Price', 'Unit Price', 'Cost'\n"
-        msg += "  • Date: 'Date', 'Invoice Date', 'Purchase Date'\n"
+        msg += "  • Vendor: 'Vendor', 'Supplier', 'Vendor Name', 'Supplier Name'\n"
+        msg += "  • Item: 'Item', 'SKU', 'Product', 'Material', 'Description'\n"
+        msg += "  • Price: 'Price', 'Unit Price', 'Cost', 'Rate', 'Unit Cost'\n"
+        msg += "  • Date: 'Date', 'Invoice Date', 'Purchase Date', 'PO Date', 'Document Date'\n"
         return msg
     
     def _clean_data(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -251,10 +286,20 @@ class PriceAnalyzer:
             raise ValueError(f"Missing required column(s): {', '.join(missing)}.")
         
         if 'unit_price' not in df.columns and 'total' not in df.columns:
-            raise ValueError("No price column found.")
+            raise ValueError("No price column found. Need either 'Unit Price' or 'Total' column.")
         
         df = df.dropna(subset=['vendor', 'item'])
-        df['date'] = pd.to_datetime(df['date'], errors='coerce', format='mixed')
+        
+        # Enhanced date parsing with multiple formats
+        df['date'] = pd.to_datetime(df['date'], errors='coerce', dayfirst=False)
+        
+        # Try European format (DD.MM.YYYY) if many failed
+        if df['date'].isna().sum() > len(df) * 0.3:
+            df.loc[df['date'].isna(), 'date'] = pd.to_datetime(
+                df.loc[df['date'].isna(), 'date'], 
+                format='%d.%m.%Y', 
+                errors='coerce'
+            )
         
         date_nulls = df['date'].isna().sum()
         if date_nulls > 0:
@@ -336,24 +381,6 @@ class PriceAnalyzer:
             records=sorted(results, key=lambda x: x.price_change_pct, reverse=True),
             warnings=self.warnings
         )
-
-def read_uploaded_file(file: UploadFile) -> pd.DataFrame:
-    try:
-        content = file.file.read()
-        if file.filename.endswith('.csv'):
-            df = pd.read_csv(io.BytesIO(content))
-        elif file.filename.endswith(('.xlsx', '.xls')):
-            df = pd.read_excel(io.BytesIO(content))
-        else:
-            raise ValueError("Unsupported file format.")
-        if df.empty:
-            raise ValueError("File is empty")
-        if len(df) > 100000:
-            raise ValueError("File too large.")
-        return df
-    except Exception as e:
-        logger.error(f"File read error: {str(e)}")
-        raise HTTPException(status_code=400, detail=f"Failed to read file: {str(e)}")
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
